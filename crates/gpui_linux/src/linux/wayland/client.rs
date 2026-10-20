@@ -104,7 +104,7 @@ use gpui::{
     KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay,
     PlatformFrameSignal, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta,
-    ScrollWheelEvent, SharedString, Size, TouchEvent, TouchId, TouchPhase, WindowButtonLayout, 
+    ScrollWheelEvent, SharedString, Size, TouchEvent, TouchId, TouchPhase, WindowButtonLayout,
     WindowKind, WindowParams, point, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
@@ -2142,12 +2142,28 @@ impl Dispatch<wl_touch::WlTouch, ()> for WaylandClientStatePtr {
                 }
             }
             wl_touch::Event::Cancel => {
-                // wl_touch v1 carries no per-touch id on Cancel, so we can't
-                // target a specific touch. Most compositors send an Up per
-                // touch before Cancel, and the recognizer recovers on the
-                // next Started, so this is intentionally left as a no-op.
-                state.touch_surfaces.clear();
-                state.touch_positions.clear();
+                // Cancel carries no touch id: it ends every touch in flight,
+                // with no Up to follow, as when the compositor takes a touch
+                // for a system gesture. Each window has to hear about it, or
+                // its recognizer keeps waiting and swallows the next touch.
+                let mut positions = std::mem::take(&mut state.touch_positions);
+                let cancelled: Vec<_> = std::mem::take(&mut state.touch_surfaces)
+                    .into_iter()
+                    .filter_map(|(id, surface_id)| {
+                        let window = get_window(&mut state, &surface_id)?;
+                        Some((window, id, positions.remove(&id).unwrap_or_default()))
+                    })
+                    .collect();
+                drop(state);
+                for (window, id, position) in cancelled {
+                    window.handle_input(PlatformInput::Touch(TouchEvent {
+                        id: TouchId(id),
+                        phase: TouchPhase::Cancelled,
+                        position,
+                        predicted_position: None,
+                        force: None,
+                    }));
+                }
             }
             _ => {}
         }
