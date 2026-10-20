@@ -916,6 +916,10 @@ impl StateInner {
         let new_scroll_top = (self.scroll_top(scroll_top) - delta.y)
             .max(px(0.))
             .min(scroll_max);
+        if delta.y != px(0.) {
+            let old_scroll_top = self.scroll_top(&self.logical_scroll_top()).min(scroll_max);
+            window.report_scroll_movement(new_scroll_top != old_scroll_top);
+        }
 
         if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
             self.pending_scroll = None;

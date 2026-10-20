@@ -583,6 +583,15 @@ struct Momentum {
     emitted_distance: f32,
 }
 
+impl Momentum {
+    /// How far the fling still travels from `now`, in pixels.
+    fn remaining_distance(&self, physics: ScrollPhysics, now: Instant) -> f32 {
+        let elapsed = now.duration_since(self.started_at);
+        physics.fling_distance(self.speed, self.duration)
+            - physics.fling_distance(self.speed, elapsed)
+    }
+}
+
 impl TouchGestureRecognizer {
     pub(crate) fn new(tuning: GestureTuning) -> Self {
         Self {
@@ -615,7 +624,10 @@ impl TouchGestureRecognizer {
                         Point::default(),
                         TouchPhase::Ended,
                     )));
-                    Some(momentum.axis)
+                    // A fling with no more travel left than a tap may wander
+                    // looks settled: the touch stops it and can still tap.
+                    let remaining = momentum.remaining_distance(self.tuning.scroll_physics, now);
+                    (remaining > f32::from(self.tuning.touch_slop)).then_some(momentum.axis)
                 } else {
                     None
                 };
@@ -1000,6 +1012,17 @@ impl TouchGestureRecognizer {
 
     pub(crate) fn has_momentum(&self) -> bool {
         self.momentum.is_some()
+    }
+
+    /// Ends the fling in progress, returning the scroll step that closes its
+    /// stream, for when its content can move no further.
+    pub(crate) fn stop_momentum(&mut self) -> Option<RecognizedTouchGesture> {
+        let momentum = self.momentum.take()?;
+        Some(RecognizedTouchGesture::Scroll(scroll_event(
+            momentum.position,
+            Point::default(),
+            TouchPhase::Ended,
+        )))
     }
 
     /// Advances post-fling momentum by one frame, returning the scroll step
@@ -1800,6 +1823,102 @@ mod tests {
             panic!("expected scroll, got {recognized:?}");
         };
         assert_eq!(scroll.touch_phase, TouchPhase::Ended);
+    }
+
+    /// Flings upward with touch 1 and returns when it lifted.
+    fn fling_upward(recognizer: &mut TouchGestureRecognizer, now: Instant) -> Instant {
+        recognizer.handle_event_at(
+            &touch_event(TouchId(1), TouchPhase::Started, 100., 300.),
+            now,
+        );
+        for step in 1..=3 {
+            recognizer.handle_event_at(
+                &touch_event(
+                    TouchId(1),
+                    TouchPhase::Moved,
+                    100.,
+                    300. - step as f32 * 33.,
+                ),
+                now + Duration::from_millis(step * 16),
+            );
+        }
+        let released = now + Duration::from_millis(64);
+        recognizer.handle_event_at(
+            &touch_event(TouchId(1), TouchPhase::Ended, 100., 200.),
+            released,
+        );
+        assert!(recognizer.has_momentum());
+        released
+    }
+
+    fn assert_taps(
+        recognizer: &mut TouchGestureRecognizer,
+        down: SmallVec<[RecognizedTouchGesture; 2]>,
+        lifted: Instant,
+    ) {
+        let pans = down.iter().any(|gesture| match gesture {
+            RecognizedTouchGesture::Scroll(scroll) => scroll.touch_phase == TouchPhase::Started,
+            _ => false,
+        });
+        assert!(!pans, "the touch should not pan, got {down:?}");
+        let recognized = recognizer.handle_event_at(
+            &touch_event(TouchId(2), TouchPhase::Ended, 100., 200.),
+            lifted,
+        );
+        assert!(
+            matches!(recognized.as_slice(), [RecognizedTouchGesture::Tap { .. }]),
+            "expected a tap, got {recognized:?}"
+        );
+    }
+
+    #[test]
+    fn touching_a_settling_fling_stops_it_and_taps() {
+        let mut recognizer = TouchGestureRecognizer::new(GestureTuning::default());
+        let released = fling_upward(&mut recognizer, Instant::now());
+        let duration = recognizer.momentum.as_ref().unwrap().duration;
+        // The last stretch of the curve covers less than the touch slop.
+        let touched = released + duration - Duration::from_millis(100);
+        assert!(
+            recognizer
+                .momentum
+                .as_ref()
+                .unwrap()
+                .remaining_distance(recognizer.tuning.scroll_physics, touched)
+                < f32::from(recognizer.tuning.touch_slop)
+        );
+
+        let down = recognizer.handle_event_at(
+            &touch_event(TouchId(2), TouchPhase::Started, 100., 200.),
+            touched,
+        );
+        let Some(RecognizedTouchGesture::Scroll(closing)) = down.first() else {
+            panic!("expected the fling to close, got {down:?}");
+        };
+        assert_eq!(closing.touch_phase, TouchPhase::Ended);
+        assert!(!recognizer.has_momentum());
+        assert_taps(&mut recognizer, down, touched + Duration::from_millis(50));
+    }
+
+    #[test]
+    fn a_fling_stopped_by_its_content_leaves_the_next_touch_a_tap() {
+        let mut recognizer = TouchGestureRecognizer::new(GestureTuning::default());
+        let released = fling_upward(&mut recognizer, Instant::now());
+
+        let Some(RecognizedTouchGesture::Scroll(closing)) = recognizer.stop_momentum() else {
+            panic!("expected the fling to close");
+        };
+        assert_eq!(closing.touch_phase, TouchPhase::Ended);
+        assert!(closing.delta.pixel_delta(px(16.)).is_zero());
+        assert!(!recognizer.has_momentum());
+        assert!(recognizer.stop_momentum().is_none());
+
+        let touched = released + Duration::from_millis(200);
+        let down = recognizer.handle_event_at(
+            &touch_event(TouchId(2), TouchPhase::Started, 100., 200.),
+            touched,
+        );
+        assert!(down.is_empty(), "expected a fresh touch, got {down:?}");
+        assert_taps(&mut recognizer, down, touched + Duration::from_millis(50));
     }
 
     #[test]

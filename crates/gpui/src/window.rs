@@ -1280,6 +1280,9 @@ pub struct Window {
     pub(crate) window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
     touch_gestures: TouchGestureRecognizer,
+    /// Whether the scroll containers under a fling step moved their content,
+    /// `None` until one of them reports.
+    fling_step_moved: Option<bool>,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
@@ -2181,6 +2184,7 @@ impl Window {
                     .gestures()
                     .map_or_else(GestureTuning::default, |gestures| gestures.tuning()),
             ),
+            fling_step_moved: None,
             touch_prediction_enabled: true,
             long_press_timer: None,
             long_press_capture: None,
@@ -5916,10 +5920,25 @@ impl Window {
         }));
     }
 
+    /// Records whether a scroll container moved its content for the scroll
+    /// event being dispatched; call it only for a nonzero delta on an axis
+    /// the container scrolls. A touch fling ends once a step moves nothing,
+    /// so the next touch is free to tap instead of catching a fling that has
+    /// already stopped at the end of its content.
+    pub fn report_scroll_movement(&mut self, moved: bool) {
+        self.fling_step_moved = Some(self.fling_step_moved.unwrap_or(false) || moved);
+    }
+
     fn schedule_touch_momentum_tick(&mut self) {
         self.on_next_frame(|window, cx| {
             if let Some(gesture) = window.touch_gestures.tick_momentum() {
+                window.fling_step_moved = None;
                 window.dispatch_recognized_touch_gesture(gesture, cx);
+                if window.fling_step_moved == Some(false)
+                    && let Some(end) = window.touch_gestures.stop_momentum()
+                {
+                    window.dispatch_recognized_touch_gesture(end, cx);
+                }
             }
             if window.touch_gestures.has_momentum() {
                 window.schedule_touch_momentum_tick();
@@ -9099,6 +9118,75 @@ mod tests {
                 (TouchPhase::Ended, px(40.)),
             ]
         );
+    }
+
+    #[gpui::test]
+    fn a_fling_ends_when_its_content_stops(cx: &mut TestAppContext) {
+        let clicks = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let clicks = clicks.clone();
+            move |_, _| FlingRow { clicks }
+        });
+        window
+            .update(cx, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let has_momentum = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |_, window, cx| {
+                    window.simulate_next_frame(cx);
+                    window.touch_gestures.has_momentum()
+                })
+                .unwrap()
+        };
+        // Velocity comes from real event times, so the pan moves at a steady
+        // 2 px/ms; a fling to the right pushes against the row's left end.
+        let fling = |cx: &mut TestAppContext, from: f32, step: f32| {
+            dispatch_touch(window, cx, TouchId(1), TouchPhase::Started, from);
+            for index in 1..=4 {
+                std::thread::sleep(Duration::from_millis(10));
+                dispatch_touch(
+                    window,
+                    cx,
+                    TouchId(1),
+                    TouchPhase::Moved,
+                    from + step * index as f32,
+                );
+            }
+            dispatch_touch(window, cx, TouchId(1), TouchPhase::Ended, from + step * 4.);
+        };
+
+        fling(cx, 10., 20.);
+        assert!(!has_momentum(cx));
+        dispatch_touch(window, cx, TouchId(2), TouchPhase::Started, 10.);
+        dispatch_touch(window, cx, TouchId(2), TouchPhase::Ended, 10.);
+        assert_eq!(clicks.get(), 1);
+
+        // A fling the content follows keeps going.
+        fling(cx, 90., -20.);
+        assert!(has_momentum(cx));
+    }
+
+    struct FlingRow {
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for FlingRow {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            div()
+                .id("row")
+                .w(px(100.))
+                .h(px(50.))
+                .overflow_x_scroll()
+                .child(
+                    div()
+                        .id("content")
+                        .flex_none()
+                        .w(px(400.))
+                        .h(px(50.))
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                )
+        }
     }
 
     struct TouchDragListener {

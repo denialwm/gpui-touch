@@ -2146,6 +2146,8 @@ pub struct Interactivity {
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
+    /// The largest scroll offset the content allows, as of the last prepaint.
+    pub(crate) scroll_max: Point<Pixels>,
     pub(crate) ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) group: Option<SharedString>,
     /// The base style of the element, before any modifications are applied
@@ -2432,7 +2434,7 @@ impl Interactivity {
     }
 
     fn clamp_scroll_position(
-        &self,
+        &mut self,
         bounds: Bounds<Pixels>,
         style: &Style,
         window: &mut Window,
@@ -2489,6 +2491,7 @@ impl Interactivity {
                 scroll_handle_state.max_offset = scroll_max;
                 scroll_handle_state.bounds = bounds;
             }
+            self.scroll_max = scroll_max;
 
             *scroll_offset
         } else {
@@ -3333,6 +3336,7 @@ impl Interactivity {
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
+            let scroll_max = self.scroll_max;
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
@@ -3376,9 +3380,16 @@ impl Interactivity {
                             delta_x = Pixels::ZERO;
                         }
                     }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
-                    if *scroll_offset != old_scroll_offset {
+                    if delta_x.is_zero() && delta_y.is_zero() {
+                        return;
+                    }
+                    // Clamp now rather than at the next prepaint, so a step
+                    // past the end of the content is seen to move nothing.
+                    scroll_offset.y = (scroll_offset.y + delta_y).clamp(-scroll_max.y, px(0.));
+                    scroll_offset.x = (scroll_offset.x + delta_x).clamp(-scroll_max.x, px(0.));
+                    let moved = *scroll_offset != old_scroll_offset;
+                    window.report_scroll_movement(moved);
+                    if moved {
                         cx.notify(current_view);
                     }
                 }
