@@ -1237,6 +1237,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         answers: &[PromptButton],
     ) -> Option<oneshot::Receiver<usize>>;
     fn activate(&self);
+    /// Activates the window with a token another program handed over, such
+    /// as the notification server that was tapped. Platforms without
+    /// activation tokens activate as usual.
+    fn activate_with_token(&self, _token: String) {
+        self.activate();
+    }
     /// Requests that the operating system draw attention to this window.
     fn request_attention(&self) {}
     fn is_active(&self) -> bool;

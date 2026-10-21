@@ -6645,6 +6645,13 @@ impl Window {
         self.platform_window.activate();
     }
 
+    /// Focus the window with an activation token from another program, such
+    /// as the notification that asked for it (Wayland's xdg-activation). The
+    /// compositor honours it even while another window has focus.
+    pub fn activate_window_with_token(&self, token: String) {
+        self.platform_window.activate_with_token(token);
+    }
+
     /// Requests that the operating system draw attention to this window.
     pub fn request_attention(&self) {
         self.platform_window.request_attention();
