@@ -1082,7 +1082,14 @@ fn compute_run_spans(
     for (grapheme_idx, grapheme) in run_text.grapheme_indices(true) {
         let abs = run_offset + grapheme_idx;
         let ch = grapheme.chars().next().unwrap_or('\0');
-        let next_slot = pick_covering_slot(ch, span_slot, primary, fallback_chain, covers);
+        // VS16 asks for emoji presentation: a fallback that has the
+        // character, such as an emoji font, beats the primary's text glyph.
+        let emoji = grapheme
+            .contains('\u{FE0F}')
+            .then(|| fallback_chain.iter().position(|(id, _)| covers(*id, ch)))
+            .flatten();
+        let next_slot =
+            emoji.or_else(|| pick_covering_slot(ch, span_slot, primary, fallback_chain, covers));
         if next_slot == span_slot {
             continue;
         }
@@ -1701,6 +1708,25 @@ mod tests {
         let text = "hello";
         let spans = compute_run_spans(text, 0, text.len(), primary, &fb, &covers);
         assert_eq!(spans.as_slice(), &[span(0, text.len(), None, primary)]);
+    }
+
+    #[test]
+    fn run_spans_send_emoji_presentation_to_a_covering_fallback() {
+        let primary = fid(0);
+        let fb = chain(&[1]);
+        // both cover the heart; only the primary covers plain text.
+        let covers = |id: FontId, ch: char| id == primary || ch == '\u{2764}';
+        let text = "a\u{2764}\u{FE0F}\u{2764}";
+        let spans = compute_run_spans(text, 0, text.len(), primary, &fb, &covers);
+        // the heart with VS16 takes the fallback; the bare one stays text.
+        assert_eq!(
+            spans.as_slice(),
+            &[
+                span(0, 1, None, primary),
+                span(1, 7, Some(0), fid(1)),
+                span(7, 10, None, primary),
+            ]
+        );
     }
 
     #[test]
