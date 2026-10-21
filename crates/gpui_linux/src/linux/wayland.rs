@@ -1,6 +1,7 @@
 mod client;
 mod clipboard;
 mod cursor;
+mod denial_insets;
 mod display;
 mod popup;
 mod serial;

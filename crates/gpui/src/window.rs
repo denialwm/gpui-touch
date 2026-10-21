@@ -1267,6 +1267,7 @@ pub struct Window {
     appearance: WindowAppearance,
     pub(crate) appearance_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) button_layout_observers: SubscriberSet<(), AnyObserver>,
+    pub(crate) keyboard_inset_observers: SubscriberSet<(), AnyObserver>,
     active: Rc<Cell<bool>>,
     visibility: WindowVisibility,
     pub(crate) visibility_observers:
@@ -1999,6 +2000,14 @@ impl Window {
                     .log_err();
             }
         }));
+        platform_window.on_keyboard_inset_changed(Box::new({
+            let mut cx = cx.to_async();
+            move || {
+                handle
+                    .update(&mut cx, |_, window, cx| window.keyboard_inset_changed(cx))
+                    .log_err();
+            }
+        }));
         platform_window.on_active_status_change(Box::new({
             let mut cx = cx.to_async();
             move |active| {
@@ -2170,6 +2179,7 @@ impl Window {
             appearance,
             appearance_observers: SubscriberSet::new(),
             button_layout_observers: SubscriberSet::new(),
+            keyboard_inset_observers: SubscriberSet::new(),
             active,
             visibility,
             visibility_observers: SubscriberSet::new(),
@@ -2926,6 +2936,29 @@ impl Window {
     /// Returns the appearance of the current window.
     pub fn appearance(&self) -> WindowAppearance {
         self.appearance
+    }
+
+    /// Lays this window out around the on-screen keyboard. The system stops
+    /// moving the window out of the keyboard's way and reports the covered
+    /// height through [`Window::keyboard_inset`] and
+    /// [`Context::observe_keyboard_inset`] instead; the window keeps its size,
+    /// so its content has to stay above that height. Returns `false` where the
+    /// platform cannot report the keyboard, which leaves the window as it was.
+    pub fn handle_keyboard_inset(&self) -> bool {
+        self.platform_window.handle_keyboard_inset()
+    }
+
+    /// How much of the bottom of this window the on-screen keyboard covers,
+    /// once [`Window::handle_keyboard_inset`] succeeded.
+    pub fn keyboard_inset(&self) -> crate::KeyboardInset {
+        self.platform_window.keyboard_inset()
+    }
+
+    fn keyboard_inset_changed(&mut self, cx: &mut App) {
+        self.refresh();
+        self.keyboard_inset_observers
+            .clone()
+            .retain(&(), |callback| callback(self, cx));
     }
 
     /// Returns the size of the drawable area within the window.

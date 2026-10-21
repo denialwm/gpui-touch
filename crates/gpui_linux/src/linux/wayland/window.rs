@@ -4,7 +4,7 @@ use std::{
     ptr::NonNull,
     rc::Rc,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use calloop::ping::Ping;
@@ -31,11 +31,15 @@ use wayland_protocols::{
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
-use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
+use crate::linux::wayland::{
+    denial_insets::{DenialKeyboardInsetV1, denial_keyboard_inset_v1},
+    display::WaylandDisplay,
+    serial::SerialKind,
+};
 use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload,
-    FrameRequestSource, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
+    FrameRequestSource, GpuSpecs, KeyboardInset, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformFrameSignal, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
     PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowDecorations,
@@ -60,6 +64,7 @@ pub(crate) struct Callbacks {
     close: Option<Box<dyn FnOnce()>>,
     appearance_changed: Option<Box<dyn FnMut()>>,
     button_layout_changed: Option<Box<dyn FnMut()>>,
+    keyboard_inset_changed: Option<Box<dyn FnMut()>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +144,8 @@ pub struct WaylandWindowState {
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
     client_inset: Option<Pixels>,
+    keyboard_inset_object: Option<DenialKeyboardInsetV1>,
+    keyboard_inset: KeyboardInset,
     accesskit_adapter: Option<accesskit_unix::Adapter>,
 }
 
@@ -639,6 +646,8 @@ impl WaylandWindowState {
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
             client_inset: None,
+            keyboard_inset_object: None,
+            keyboard_inset: KeyboardInset::default(),
             accesskit_adapter: None,
         })
     }
@@ -785,6 +794,10 @@ impl Drop for WaylandWindow {
         // Destroy blur first, this has no dependencies.
         if let Some(blur) = &state.blur {
             blur.release();
+        }
+
+        if let Some(keyboard_inset) = &state.keyboard_inset_object {
+            keyboard_inset.destroy();
         }
 
         // Decorations must be destroyed before the xdg state.
@@ -1202,6 +1215,19 @@ impl WaylandWindowStatePtr {
             }
             update_window(self.state.borrow_mut());
             self.request_redraw();
+        }
+    }
+
+    pub fn handle_keyboard_inset_event(&self, event: denial_keyboard_inset_v1::Event) {
+        let denial_keyboard_inset_v1::Event::Inset { height, duration } = event;
+        self.state.borrow_mut().keyboard_inset = KeyboardInset {
+            height: px(height as f32),
+            duration: Duration::from_millis(duration.into()),
+        };
+        let callback = self.callbacks.borrow_mut().keyboard_inset_changed.take();
+        if let Some(mut fun) = callback {
+            fun();
+            self.callbacks.borrow_mut().keyboard_inset_changed = Some(fun);
         }
     }
 
@@ -2013,6 +2039,24 @@ impl PlatformWindow for WaylandWindow {
 
     fn on_button_layout_changed(&self, callback: Box<dyn FnMut()>) {
         self.0.callbacks.borrow_mut().button_layout_changed = Some(callback);
+    }
+
+    fn handle_keyboard_inset(&self) -> bool {
+        let mut state = self.borrow_mut();
+        if state.keyboard_inset_object.is_none() {
+            state.keyboard_inset_object = state.globals.insets_manager.as_ref().map(|manager| {
+                manager.get_keyboard_inset(&state.surface, &state.globals.qh, state.surface.id())
+            });
+        }
+        state.keyboard_inset_object.is_some()
+    }
+
+    fn keyboard_inset(&self) -> KeyboardInset {
+        self.borrow().keyboard_inset
+    }
+
+    fn on_keyboard_inset_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.callbacks.borrow_mut().keyboard_inset_changed = Some(callback);
     }
 
     fn draw(&self, scene: &Scene) {

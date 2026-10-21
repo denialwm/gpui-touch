@@ -491,6 +491,25 @@ impl<'a, T: 'static> Context<'a, T> {
         subscription
     }
 
+    /// Registers a callback invoked when the on-screen keyboard's height over
+    /// the window changes. See [`Window::handle_keyboard_inset`].
+    pub fn observe_keyboard_inset(
+        &self,
+        window: &mut Window,
+        mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
+    ) -> Subscription {
+        let view = self.weak_entity();
+        let (subscription, activate) = window.keyboard_inset_observers.insert(
+            (),
+            Box::new(move |window, cx| {
+                view.update(cx, |view, cx| callback(view, window, cx))
+                    .is_ok()
+            }),
+        );
+        activate();
+        subscription
+    }
+
     /// Registers a callback to be invoked when the window button layout changes.
     pub fn observe_button_layout_changed(
         &self,

@@ -1279,6 +1279,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_close(&self, callback: Box<dyn FnOnce()>);
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
+    /// See [`Window::handle_keyboard_inset`]. Platforms that cannot report the
+    /// on-screen keyboard return `false` and leave the window as it was.
+    fn handle_keyboard_inset(&self) -> bool {
+        false
+    }
+    fn keyboard_inset(&self) -> KeyboardInset {
+        KeyboardInset::default()
+    }
+    fn on_keyboard_inset_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
@@ -2764,6 +2773,17 @@ pub enum WindowAppearance {
     ///
     /// On macOS, this corresponds to the `NSAppearanceNameVibrantDark` appearance.
     VibrantDark,
+}
+
+/// How much of the bottom of a window the on-screen keyboard covers, see
+/// [`Window::handle_keyboard_inset`].
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct KeyboardInset {
+    /// The covered height, zero while the keyboard is hidden.
+    pub height: Pixels,
+    /// How long the system's keyboard motion toward `height` lasts. Animating
+    /// the layout over it keeps the window in step with the keyboard.
+    pub duration: Duration,
 }
 
 /// The appearance of the background of the window itself, when there is
