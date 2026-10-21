@@ -1,5 +1,8 @@
+mod backdrop_blur;
+
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
+use backdrop_blur::BackdropBlurs;
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
@@ -194,6 +197,8 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    /// Made with the first frame that has a backdrop blur.
+    backdrop_blurs: Option<BackdropBlurs>,
 }
 
 struct CachedTextureBindGroup {
@@ -445,7 +450,9 @@ impl WgpuRenderer {
         }
 
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // Backdrop blurs sample the frame drawn so far.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | (surface_caps.usages & wgpu::TextureUsages::TEXTURE_BINDING),
             format: surface_format,
             width: clamped_width.max(1),
             height: clamped_height.max(1),
@@ -1196,9 +1203,15 @@ impl WgpuRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let premultiplied_alpha =
             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+        let readable = self
+            .surface_config
+            .usage
+            .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            .then_some(&frame.texture);
         if let Err(error) = core.render_frame(
             scene,
             &frame_view,
+            readable,
             size,
             premultiplied_alpha,
             wgpu::Color::TRANSPARENT,
@@ -1353,6 +1366,7 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                backdrop_blurs: None,
             },
             atlas,
             path_globals_offset,
@@ -1414,10 +1428,13 @@ impl WgpuRendererCore {
         resources.path_msaa_view = path_msaa_view;
     }
 
+    /// `readable` is the target itself when it can be sampled, for backdrop
+    /// blurs; without it they are left out.
     fn render_frame(
         &mut self,
         scene: &Scene,
         target_view: &wgpu::TextureView,
+        readable: Option<&wgpu::Texture>,
         size: Size<DevicePixels>,
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
@@ -1468,7 +1485,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color)
+        self.record_frame(scene, target_view, readable, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1479,6 +1496,7 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
+        readable: Option<&wgpu::Texture>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
@@ -1497,6 +1515,18 @@ impl WgpuRendererCore {
                 )
             })?;
         self.prepare_texture_bind_groups(scene);
+
+        // Half-float targets are not renderable on WebGL2.
+        let readable =
+            readable.filter(|_| !scene.backdrop_blurs.is_empty() && !self.uses_webgl_instance_data);
+        if readable.is_some() {
+            let resources = &mut self.resources;
+            let format = self.target_format;
+            resources
+                .backdrop_blurs
+                .get_or_insert_with(|| BackdropBlurs::new(&resources.device, format))
+                .begin_frame(&resources.device, scene.backdrop_blurs.len());
+        }
 
         let mut encoder =
             self.resources()
@@ -1548,20 +1578,7 @@ impl WgpuRendererCore {
                             &mut instance_offset,
                         )?;
 
-                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("main_pass_continued"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: frame_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: None,
-                            ..Default::default()
-                        });
+                        pass = continue_main_pass(&mut encoder, frame_view);
 
                         if rasterized {
                             self.draw_paths_from_intermediate(
@@ -1612,8 +1629,42 @@ impl WgpuRendererCore {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::BackdropBlurs(range) => {
+                        let Some(frame) = readable else {
+                            continue;
+                        };
+                        // Blurs of one order do not overlap, so they share a
+                        // break in the main pass; a later order may read an
+                        // earlier one's result.
+                        let mut blurs = &scene.backdrop_blurs[range];
+                        while let Some(first) = blurs.first() {
+                            let same_order = blurs
+                                .iter()
+                                .take_while(|blur| blur.order == first.order)
+                                .count();
+                            let (group, rest) = blurs.split_at(same_order);
+                            blurs = rest;
+
+                            drop(pass);
+                            let resources = &mut self.resources;
+                            let backdrop_blurs = resources
+                                .backdrop_blurs
+                                .as_mut()
+                                .context("backdrop blurs were not prepared")?;
+                            let blurred =
+                                backdrop_blurs.blur(&resources.device, &mut encoder, frame, group);
+                            pass = continue_main_pass(&mut encoder, frame_view);
+                            backdrop_blurs.composite(&blurred, &mut pass);
+                        }
+                    }
                 }
             }
+        }
+
+        if readable.is_some()
+            && let Some(backdrop_blurs) = self.resources.backdrop_blurs.as_mut()
+        {
+            backdrop_blurs.finish_frame(&self.resources.queue);
         }
 
         let submission = self
@@ -2373,7 +2424,9 @@ impl WgpuHeadlessRenderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.core.target_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2399,14 +2452,19 @@ impl WgpuHeadlessRenderer {
     fn render(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
         self.check_gpu_errors()?;
         self.ensure_render_target(size)?;
-        let view = self
+        let target = self
             .render_target
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?
-            .view
-            .clone();
-        self.core
-            .render_frame(scene, &view, size, false, wgpu::Color::BLACK)?;
+            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
+        let (texture, view) = (target.texture.clone(), target.view.clone());
+        self.core.render_frame(
+            scene,
+            &view,
+            Some(&texture),
+            size,
+            false,
+            wgpu::Color::BLACK,
+        )?;
         Ok(())
     }
 
@@ -2543,6 +2601,27 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.core.atlas.clone()
     }
+}
+
+/// The main pass again, after a break to draw elsewhere.
+fn continue_main_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    frame_view: &wgpu::TextureView,
+) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("main_pass_continued"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: frame_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        ..Default::default()
+    })
 }
 
 fn instance_range(range: Range<usize>) -> Range<u32> {
@@ -2694,6 +2773,52 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn headless_renderer_blurs_the_backdrop() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let mut scene = Scene::default();
+        scene.insert_primitive(solid_quad(0.0, 0.0, 64.0, 64.0, gpui::red()));
+        scene.insert_primitive(solid_quad(64.0, 0.0, 64.0, 64.0, gpui::blue()));
+        let bounds = Bounds {
+            origin: Point {
+                x: 32.0.into(),
+                y: 16.0.into(),
+            },
+            size: Size {
+                width: 64.0.into(),
+                height: 32.0.into(),
+            },
+        };
+        scene.insert_primitive(gpui::BackdropBlur {
+            order: 0,
+            blur_radius: 16.0.into(),
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii: Corners::default(),
+            opacity: 1.0,
+        });
+        scene.insert_primitive(solid_quad(88.0, 40.0, 4.0, 4.0, gpui::green()));
+        scene.finish();
+
+        let image = renderer.render_scene_to_image(&scene, device_size(128, 64))?;
+        // Outside the blur nothing changes, even at the seam.
+        assert_pixel(&image, 10, 32, RED);
+        assert_pixel(&image, 64, 4, BLUE);
+        // At the seam the two halves mix.
+        let [red, green, blue, alpha] = image.get_pixel(64, 32).0;
+        assert!(
+            (90..=165).contains(&red) && (90..=165).contains(&blue) && green < 8 && alpha == 255,
+            "the seam under the blur was {:?}",
+            [red, green, blue, alpha]
+        );
+        // Far from the seam the blur keeps its colour.
+        assert!(image.get_pixel(34, 32).0[0] > 235);
+        // What is painted after the blur lies on it, sharp.
+        assert_pixel(&image, 90, 42, [0, 128, 0, 255]);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn headless_renderer_captures_each_requested_size() -> anyhow::Result<()> {
         let mut renderer = WgpuHeadlessRenderer::new()?;
         let mut scene = Scene::default();
@@ -2787,6 +2912,18 @@ mod tests {
         validate_wgsl(
             SUBPIXEL_SHADERS,
             naga::valid::Capabilities::DUAL_SOURCE_BLENDING,
+        );
+    }
+
+    #[test]
+    fn backdrop_blur_shaders_are_valid_wgsl() {
+        validate_wgsl(
+            include_str!("backdrop_blur.wgsl"),
+            naga::valid::Capabilities::empty(),
+        );
+        validate_wgsl(
+            include_str!("backdrop_composite.wgsl"),
+            naga::valid::Capabilities::empty(),
         );
     }
 

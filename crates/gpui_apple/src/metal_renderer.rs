@@ -793,6 +793,8 @@ impl MetalRenderer {
                     command_encoder,
                 ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
+                // Not implemented by the Metal renderer.
+                PrimitiveBatch::BackdropBlurs(_) => {}
             }
         }
 

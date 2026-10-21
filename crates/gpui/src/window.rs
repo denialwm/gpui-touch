@@ -6,8 +6,8 @@ use crate::Inspector;
 use crate::profiler;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds,
+    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
@@ -4623,6 +4623,33 @@ impl Window {
                 pad: 0,
             });
         }
+    }
+
+    /// Blur what is painted under `bounds` so far, inside its rounded
+    /// corners, by `blur_radius`: the backdrop of frosted glass. Paint it
+    /// before the element's background, which tints the blur. Renderers
+    /// that cannot read back what they drew leave it out.
+    pub fn paint_backdrop_blur(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur_radius: Pixels,
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let opacity = self.element_opacity();
+        if blur_radius <= px(0.) || opacity <= 0. {
+            return;
+        }
+        let scale_factor = self.scale_factor();
+        self.next_frame.scene.insert_primitive(BackdropBlur {
+            order: 0,
+            blur_radius: blur_radius.scale(scale_factor),
+            bounds: self.snap_bounds(bounds),
+            content_mask: self.snapped_content_mask(),
+            corner_radii: corner_radii.scale(scale_factor),
+            opacity,
+        });
     }
 
     /// Paint the inset shadows from `shadows` into the scene at the current z-index. Should
