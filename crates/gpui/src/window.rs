@@ -9256,6 +9256,57 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn claimed_touch_drag_released_in_place_is_a_tap(cx: &mut TestAppContext) {
+        let clicks = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let clicks = clicks.clone();
+            move |_, _| DraggedTarget { clicks }
+        });
+
+        dispatch_touch(window, cx, TouchId(1), TouchPhase::Started, 10.);
+        dispatch_touch(window, cx, TouchId(1), TouchPhase::Ended, 10.);
+        dispatch_touch(window, cx, TouchId(2), TouchPhase::Started, 12.);
+        dispatch_touch(window, cx, TouchId(2), TouchPhase::Ended, 12.);
+        assert_eq!(clicks.borrow().as_slice(), [1, 2]);
+
+        // A drag that leaves the slop is no tap, even back where it began.
+        dispatch_touch(window, cx, TouchId(3), TouchPhase::Started, 100.);
+        dispatch_touch(window, cx, TouchId(3), TouchPhase::Moved, 160.);
+        dispatch_touch(window, cx, TouchId(3), TouchPhase::Moved, 100.);
+        dispatch_touch(window, cx, TouchId(3), TouchPhase::Ended, 100.);
+        assert_eq!(clicks.borrow().as_slice(), [1, 2]);
+    }
+
+    /// Claims every touch as a drag, and records the taps it gets anyway.
+    struct DraggedTarget {
+        clicks: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Render for DraggedTarget {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            div()
+                .id("target")
+                .w(px(200.))
+                .h(px(50.))
+                .on_click(move |event, _, _| clicks.borrow_mut().push(event.click_count()))
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        |_, _, window, _| {
+                            window.on_mouse_event(|event: &TouchDragEvent, phase, window, _| {
+                                if phase == DispatchPhase::Bubble && event.phase == TouchPhase::Started {
+                                    window.prevent_default();
+                                }
+                            });
+                        },
+                    )
+                    .size_full(),
+                )
+        }
+    }
+
     struct TouchDragListener {
         events: Rc<RefCell<Vec<(TouchPhase, Pixels)>>>,
     }

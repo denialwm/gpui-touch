@@ -539,7 +539,10 @@ enum TouchGestureState {
         axis: Axis,
     },
     LongPressing(ActiveTouch),
-    TouchDragging(ActiveTouch),
+    /// A touch an element claimed as a free drag. `tap` holds while it has
+    /// stayed within `touch_slop`: released then, it is also a tap, so an
+    /// element that drags (a zoomed photo) still gets taps and double taps.
+    TouchDragging { touch: ActiveTouch, tap: bool },
 }
 
 struct ActiveTouch {
@@ -767,50 +770,23 @@ impl TouchGestureRecognizer {
                     }));
                     self.state = TouchGestureState::LongPressing(touch);
                 }
-                TouchGestureState::TouchDragging(mut touch) if touch.id == event.id => {
+                TouchGestureState::TouchDragging { mut touch, tap } if touch.id == event.id => {
                     touch.last_position = event.position;
+                    let tap = tap
+                        && (event.position - touch.start_position).magnitude()
+                            <= f64::from(self.tuning.touch_slop);
                     recognized.push(RecognizedTouchGesture::TouchDrag(TouchDragEvent {
                         phase: TouchPhase::Moved,
                         start_position: touch.start_position,
                         position: event.position,
                     }));
-                    self.state = TouchGestureState::TouchDragging(touch);
+                    self.state = TouchGestureState::TouchDragging { touch, tap };
                 }
                 other => self.state = other,
             },
             TouchPhase::Ended => match mem::replace(&mut self.state, TouchGestureState::Idle) {
                 TouchGestureState::Pending { touch, .. } if touch.id == event.id => {
-                    let tap_count = match &self.last_tap {
-                        Some(tap)
-                            if now.duration_since(tap.time) <= self.tuning.multi_tap_interval
-                                && (event.position - tap.position).magnitude()
-                                    <= f64::from(self.tuning.multi_tap_slop) =>
-                        {
-                            tap.count + 1
-                        }
-                        _ => 1,
-                    };
-                    self.last_tap = Some(CompletedTap {
-                        position: event.position,
-                        time: now,
-                        count: tap_count,
-                    });
-                    recognized.push(RecognizedTouchGesture::Tap {
-                        down: MouseDownEvent {
-                            button: MouseButton::Left,
-                            position: event.position,
-                            modifiers: Modifiers::default(),
-                            click_count: tap_count,
-                            first_mouse: false,
-                        },
-                        up: MouseUpEvent {
-                            button: MouseButton::Left,
-                            position: event.position,
-                            modifiers: Modifiers::default(),
-                            click_count: tap_count,
-                        },
-                    });
-                    self.last_resolved_at = Some(now);
+                    recognized.push(self.tap(event.position, now));
                 }
                 TouchGestureState::Panning { touch, axis } if touch.id == event.id => {
                     // The release deliberately contributes no velocity
@@ -886,12 +862,18 @@ impl TouchGestureRecognizer {
                         position: event.position,
                     }));
                 }
-                TouchGestureState::TouchDragging(touch) if touch.id == event.id => {
+                TouchGestureState::TouchDragging { touch, tap } if touch.id == event.id => {
                     recognized.push(RecognizedTouchGesture::TouchDrag(TouchDragEvent {
                         phase: TouchPhase::Ended,
                         start_position: touch.start_position,
                         position: event.position,
                     }));
+                    let tap = tap
+                        && (event.position - touch.start_position).magnitude()
+                            <= f64::from(self.tuning.touch_slop);
+                    if tap {
+                        recognized.push(self.tap(event.position, now));
+                    }
                 }
                 other => self.state = other,
             },
@@ -914,7 +896,7 @@ impl TouchGestureRecognizer {
                         position: event.position,
                     }));
                 }
-                TouchGestureState::TouchDragging(touch) if touch.id == event.id => {
+                TouchGestureState::TouchDragging { touch, .. } if touch.id == event.id => {
                     recognized.push(RecognizedTouchGesture::TouchDrag(TouchDragEvent {
                         phase: TouchPhase::Cancelled,
                         start_position: touch.start_position,
@@ -925,6 +907,41 @@ impl TouchGestureRecognizer {
             },
         }
         recognized
+    }
+
+    /// A tap released at `position`, counted with the taps just before it.
+    fn tap(&mut self, position: Point<Pixels>, now: Instant) -> RecognizedTouchGesture {
+        let tap_count = match &self.last_tap {
+            Some(tap)
+                if now.duration_since(tap.time) <= self.tuning.multi_tap_interval
+                    && (position - tap.position).magnitude()
+                        <= f64::from(self.tuning.multi_tap_slop) =>
+            {
+                tap.count + 1
+            }
+            _ => 1,
+        };
+        self.last_tap = Some(CompletedTap {
+            position,
+            time: now,
+            count: tap_count,
+        });
+        self.last_resolved_at = Some(now);
+        RecognizedTouchGesture::Tap {
+            down: MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count: tap_count,
+                first_mouse: false,
+            },
+            up: MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count: tap_count,
+            },
+        }
     }
 
     pub(crate) fn pending_long_press(&self) -> Option<(TouchId, Duration)> {
@@ -1005,7 +1022,7 @@ impl TouchGestureRecognizer {
                 touch,
                 touch_drag_offered: true,
                 ..
-            } => TouchGestureState::TouchDragging(touch),
+            } => TouchGestureState::TouchDragging { touch, tap: true },
             other => other,
         };
     }
