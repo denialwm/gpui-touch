@@ -118,6 +118,22 @@ struct Edges {
     left: f32,
 }
 
+fn pack_bounds(bounds: Bounds) -> vec4<f32> {
+    return vec4<f32>(bounds.origin, bounds.size);
+}
+
+fn unpack_bounds(packed: vec4<f32>) -> Bounds {
+    return Bounds(packed.xy, packed.zw);
+}
+
+fn pack_corners(corners: Corners) -> vec4<f32> {
+    return vec4<f32>(corners.top_left, corners.top_right, corners.bottom_right, corners.bottom_left);
+}
+
+fn unpack_corners(packed: vec4<f32>) -> Corners {
+    return Corners(packed.x, packed.y, packed.z, packed.w);
+}
+
 struct Hsla {
     h: f32,
     s: f32,
@@ -527,15 +543,22 @@ struct Quad {
     border_widths: Edges,
 }
 
+// What the fragment shader needs travels in flat varyings, as for shadows.
 struct QuadVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) @interpolate(flat) border_color: vec4<f32>,
-    @location(1) @interpolate(flat) quad_id: u32,
+    // Background tag and color space, and border style.
+    @location(1) @interpolate(flat) kinds: vec3<u32>,
     // TODO: use `clip_distance` once Naga supports it
     @location(2) clip_distances: vec4<f32>,
     @location(3) @interpolate(flat) background_solid: vec4<f32>,
     @location(4) @interpolate(flat) background_color0: vec4<f32>,
     @location(5) @interpolate(flat) background_color1: vec4<f32>,
+    @location(6) @interpolate(flat) bounds: vec4<f32>,
+    @location(7) @interpolate(flat) corner_radii: vec4<f32>,
+    @location(8) @interpolate(flat) border_widths: vec4<f32>,
+    // Gradient angle or pattern height, and the two stops' percentages.
+    @location(9) @interpolate(flat) gradient: vec3<f32>,
 }
 
 @vertex
@@ -556,8 +579,14 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
     out.background_color0 = gradient.color0;
     out.background_color1 = gradient.color1;
     out.border_color = hsla_to_rgba(quad.border_color);
-    out.quad_id = instance_id;
+    out.kinds = vec3<u32>(quad.background.tag, quad.background.color_space, quad.border_style);
     out.clip_distances = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
+    out.bounds = pack_bounds(quad.bounds);
+    out.corner_radii = pack_corners(quad.corner_radii);
+    out.border_widths = vec4<f32>(quad.border_widths.top, quad.border_widths.right,
+        quad.border_widths.bottom, quad.border_widths.left);
+    out.gradient = vec3<f32>(quad.background.gradient_angle_or_pattern_height,
+        quad.background.colors[0].percentage, quad.background.colors[1].percentage);
     return out;
 }
 
@@ -568,7 +597,17 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let quad = load_quad(input.quad_id);
+    var quad: Quad;
+    quad.background.tag = input.kinds.x;
+    quad.background.color_space = input.kinds.y;
+    quad.border_style = input.kinds.z;
+    quad.background.gradient_angle_or_pattern_height = input.gradient.x;
+    quad.background.colors[0].percentage = input.gradient.y;
+    quad.background.colors[1].percentage = input.gradient.z;
+    quad.bounds = unpack_bounds(input.bounds);
+    quad.corner_radii = unpack_corners(input.corner_radii);
+    quad.border_widths = Edges(input.border_widths.x, input.border_widths.y,
+        input.border_widths.z, input.border_widths.w);
 
     let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
         input.background_solid, input.background_color0, input.background_color1);
@@ -964,12 +1003,19 @@ struct Shadow {
     pad: u32, // align to 8 bytes
 }
 
+// What the fragment shader needs travels in flat varyings: reading the
+// instance from its storage buffer for every pixel costs a large shadow
+// milliseconds on tiled mobile GPUs.
 struct ShadowVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) @interpolate(flat) color: vec4<f32>,
-    @location(1) @interpolate(flat) shadow_id: u32,
+    @location(1) @interpolate(flat) blur_radius_and_inset: vec2<f32>,
     //TODO: use `clip_distance` once Naga supports it
     @location(3) clip_distances: vec4<f32>,
+    @location(4) @interpolate(flat) bounds: vec4<f32>,
+    @location(5) @interpolate(flat) corner_radii: vec4<f32>,
+    @location(6) @interpolate(flat) element_bounds: vec4<f32>,
+    @location(7) @interpolate(flat) element_corner_radii: vec4<f32>,
 }
 
 @vertex
@@ -991,8 +1037,12 @@ fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) ins
     var out = ShadowVarying();
     out.position = to_device_position(unit_vertex, geometry);
     out.color = hsla_to_rgba(shadow.color);
-    out.shadow_id = instance_id;
+    out.blur_radius_and_inset = vec2<f32>(shadow.blur_radius, f32(shadow.inset));
     out.clip_distances = distance_from_clip_rect(unit_vertex, geometry, shadow.content_mask);
+    out.bounds = pack_bounds(shadow.bounds);
+    out.corner_radii = pack_corners(shadow.corner_radii);
+    out.element_bounds = pack_bounds(shadow.element_bounds);
+    out.element_corner_radii = pack_corners(shadow.element_corner_radii);
     return out;
 }
 
@@ -1003,7 +1053,13 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let shadow = load_shadow(input.shadow_id);
+    var shadow: Shadow;
+    shadow.blur_radius = input.blur_radius_and_inset.x;
+    shadow.inset = u32(input.blur_radius_and_inset.y);
+    shadow.bounds = unpack_bounds(input.bounds);
+    shadow.corner_radii = unpack_corners(input.corner_radii);
+    shadow.element_bounds = unpack_bounds(input.element_bounds);
+    shadow.element_corner_radii = unpack_corners(input.element_corner_radii);
     let half_size = shadow.bounds.size / 2.0;
     let center = shadow.bounds.origin + half_size;
     let center_to_point = input.position.xy - center;
@@ -1056,12 +1112,20 @@ struct PathRasterizationVertex {
 
 
 
+// What the fragment shader needs travels in flat varyings, as for quads.
 struct PathRasterizationVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) st_position: vec2<f32>,
-    @location(1) @interpolate(flat) vertex_id: u32,
+    // Background tag and color space.
+    @location(1) @interpolate(flat) kinds: vec2<u32>,
     //TODO: use `clip_distance` once Naga supports it
     @location(3) clip_distances: vec4<f32>,
+    @location(4) @interpolate(flat) background_solid: vec4<f32>,
+    @location(5) @interpolate(flat) background_color0: vec4<f32>,
+    @location(6) @interpolate(flat) background_color1: vec4<f32>,
+    @location(7) @interpolate(flat) bounds: vec4<f32>,
+    // Gradient angle or pattern height, and the two stops' percentages.
+    @location(8) @interpolate(flat) gradient: vec3<f32>,
 }
 
 @vertex
@@ -1071,8 +1135,20 @@ fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasteriza
     var out = PathRasterizationVarying();
     out.position = to_device_position_impl(v.xy_position);
     out.st_position = v.st_position;
-    out.vertex_id = vertex_id;
+    out.kinds = vec2<u32>(v.color.tag, v.color.color_space);
     out.clip_distances = distance_from_clip_rect_impl(v.xy_position, v.bounds);
+    let prepared_gradient = prepare_gradient_color(
+        v.color.tag,
+        v.color.color_space,
+        v.color.solid,
+        v.color.colors,
+    );
+    out.background_solid = prepared_gradient.solid;
+    out.background_color0 = prepared_gradient.color0;
+    out.background_color1 = prepared_gradient.color1;
+    out.bounds = pack_bounds(v.bounds);
+    out.gradient = vec3<f32>(v.color.gradient_angle_or_pattern_height,
+        v.color.colors[0].percentage, v.color.colors[1].percentage);
     return out;
 }
 
@@ -1084,9 +1160,13 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         return vec4<f32>(0.0);
     }
 
-    let v = load_path_vertex(input.vertex_id);
-    let background = v.color;
-    let bounds = v.bounds;
+    var background: Background;
+    background.tag = input.kinds.x;
+    background.color_space = input.kinds.y;
+    background.gradient_angle_or_pattern_height = input.gradient.x;
+    background.colors[0].percentage = input.gradient.y;
+    background.colors[1].percentage = input.gradient.z;
+    let bounds = unpack_bounds(input.bounds);
 
     var alpha: f32;
     if (length(vec2<f32>(dx.x, dy.x)) < 0.001) {
@@ -1098,14 +1178,8 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         let distance = f / length(gradient);
         alpha = saturate(0.5 - distance);
     }
-    let prepared_gradient = prepare_gradient_color(
-        background.tag,
-        background.color_space,
-        background.solid,
-        background.colors,
-    );
     let color = gradient_color(background, input.position.xy, bounds,
-        prepared_gradient.solid, prepared_gradient.color0, prepared_gradient.color1);
+        input.background_solid, input.background_color0, input.background_color1);
     return vec4<f32>(color.rgb * color.a * alpha, color.a * alpha);
 }
 
@@ -1160,9 +1234,11 @@ struct Underline {
 struct UnderlineVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) @interpolate(flat) color: vec4<f32>,
-    @location(1) @interpolate(flat) underline_id: u32,
+    // Thickness, and whether it is wavy.
+    @location(1) @interpolate(flat) thickness_and_wavy: vec2<f32>,
     //TODO: use `clip_distance` once Naga supports it
     @location(3) clip_distances: vec4<f32>,
+    @location(4) @interpolate(flat) bounds: vec4<f32>,
 }
 
 @vertex
@@ -1173,8 +1249,9 @@ fn vs_underline(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) 
     var out = UnderlineVarying();
     out.position = to_device_position(unit_vertex, underline.bounds);
     out.color = hsla_to_rgba(underline.color);
-    out.underline_id = instance_id;
+    out.thickness_and_wavy = vec2<f32>(underline.thickness, f32(underline.wavy));
     out.clip_distances = distance_from_clip_rect(unit_vertex, underline.bounds, underline.content_mask);
+    out.bounds = pack_bounds(underline.bounds);
     return out;
 }
 
@@ -1188,7 +1265,10 @@ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let underline = load_underline(input.underline_id);
+    var underline: Underline;
+    underline.thickness = input.thickness_and_wavy.x;
+    underline.wavy = u32(input.thickness_and_wavy.y);
+    underline.bounds = unpack_bounds(input.bounds);
     if (underline.wavy == 0u)
     {
         return blend_color(input.color, input.color.a);
@@ -1274,8 +1354,11 @@ struct PolychromeSprite {
 struct PolySpriteVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) tile_position: vec2<f32>,
-    @location(1) @interpolate(flat) sprite_id: u32,
+    // Opacity, and whether it is drawn in grayscale.
+    @location(1) @interpolate(flat) opacity_and_grayscale: vec2<f32>,
     @location(3) clip_distances: vec4<f32>,
+    @location(4) @interpolate(flat) bounds: vec4<f32>,
+    @location(5) @interpolate(flat) corner_radii: vec4<f32>,
 }
 
 @vertex
@@ -1286,8 +1369,10 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     var out = PolySpriteVarying();
     out.position = to_device_position(unit_vertex, sprite.bounds);
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
-    out.sprite_id = instance_id;
+    out.opacity_and_grayscale = vec2<f32>(sprite.opacity, f32(sprite.grayscale));
     out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    out.bounds = pack_bounds(sprite.bounds);
+    out.corner_radii = pack_corners(sprite.corner_radii);
     return out;
 }
 
@@ -1299,7 +1384,11 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let sprite = load_poly_sprite(input.sprite_id);
+    var sprite: PolychromeSprite;
+    sprite.opacity = input.opacity_and_grayscale.x;
+    sprite.grayscale = u32(input.opacity_and_grayscale.y);
+    sprite.bounds = unpack_bounds(input.bounds);
+    sprite.corner_radii = unpack_corners(input.corner_radii);
     let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
