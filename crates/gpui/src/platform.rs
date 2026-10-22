@@ -2455,6 +2455,9 @@ pub struct TextInputConfiguration {
     pub suggestions: bool,
     /// The action advertised on a software keyboard's confirm ("enter") key.
     pub input_action: TextInputAction,
+    /// Whether the region holds a secret, such as a password: input methods
+    /// should neither show nor remember what is typed.
+    pub secret: bool,
 }
 
 /// Automatic capitalization applied by software keyboards.

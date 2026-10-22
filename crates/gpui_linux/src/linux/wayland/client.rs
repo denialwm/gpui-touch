@@ -100,13 +100,13 @@ use crate::linux::{
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
 };
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, ExternalDragPayload,
-    FileDragPaths, FileDropEvent, ForegroundExecutor, GraphicalEnvironment, KeyDownEvent,
-    KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay,
-    PlatformFrameSignal, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta,
-    ScrollWheelEvent, SharedString, Size, TouchEvent, TouchId, TouchPhase, WindowButtonLayout,
-    WindowKind, WindowParams, point, px, size,
+    AnyWindowHandle, Autocapitalize, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId,
+    ExternalDragPayload, FileDragPaths, FileDropEvent, ForegroundExecutor, GraphicalEnvironment,
+    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels,
+    PlatformDisplay, PlatformFrameSignal, PlatformInput, PlatformKeyboardLayout, PlatformWindow,
+    Point, ScrollDelta, ScrollWheelEvent, SharedString, Size, TextInputConfiguration, TouchEvent,
+    TouchId, TouchPhase, WindowButtonLayout, WindowKind, WindowParams, point, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -163,6 +163,28 @@ fn set_ime_cursor_rectangle(
         cursor_rectangle.width,
         cursor_rectangle.height,
     );
+}
+
+/// The text-input content type for a text region's preferences: a secret
+/// is a password, hidden from the input method and kept out of its memory.
+fn content_type(configuration: &TextInputConfiguration) -> (ContentHint, ContentPurpose) {
+    if configuration.secret {
+        return (
+            ContentHint::HiddenText | ContentHint::SensitiveData,
+            ContentPurpose::Password,
+        );
+    }
+    let mut hint = ContentHint::None;
+    if configuration.suggestions {
+        hint |= ContentHint::Completion | ContentHint::Spellcheck;
+    }
+    hint |= match configuration.autocapitalize {
+        Autocapitalize::None => ContentHint::None,
+        Autocapitalize::Words => ContentHint::Titlecase,
+        Autocapitalize::Sentences => ContentHint::AutoCapitalization,
+        Autocapitalize::Characters => ContentHint::Uppercase,
+    };
+    (hint, ContentPurpose::Normal)
 }
 
 fn update_ime_cursor_rectangle(
@@ -726,10 +748,11 @@ impl WaylandClientStatePtr {
         };
 
         text_input.enable();
-        text_input.set_content_type(ContentHint::None, ContentPurpose::Normal);
         let mut cursor_rectangle = None;
+        let mut configuration = TextInputConfiguration::default();
         if let Some(window) = state.keyboard_focused_window.clone() {
             drop(state);
+            configuration = window.text_input_configuration();
             if let Some(area) = window.get_ime_area() {
                 let area = ImeCursorRectangle::from(area);
                 set_ime_cursor_rectangle(&text_input, area);
@@ -737,9 +760,27 @@ impl WaylandClientStatePtr {
             }
             state = client.borrow_mut();
         }
+        // Enabling resets the content type, so it goes with every enable.
+        let (hint, purpose) = content_type(&configuration);
+        text_input.set_content_type(hint, purpose);
         text_input.commit();
         state.last_ime_cursor_rectangle = cursor_rectangle;
         state.text_input = Some(text_input);
+    }
+
+    /// Tells the input method what the focused text region holds, when the
+    /// region changes while input is enabled.
+    pub fn update_ime_content_type(&self, configuration: &TextInputConfiguration) {
+        let client = self.get_client();
+        let state = client.borrow();
+        if state.ime_enabled != Some(true) {
+            return;
+        }
+        if let Some(text_input) = &state.text_input {
+            let (hint, purpose) = content_type(configuration);
+            text_input.set_content_type(hint, purpose);
+            text_input.commit();
+        }
     }
 
     pub fn disable_ime(&self) {

@@ -41,9 +41,9 @@ use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload,
     FrameRequestSource, GpuSpecs, KeyboardInset, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformFrameSignal, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
-    PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowDecorations,
-    WindowKind, WindowParams, WindowVisibility,
+    PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, TextInputConfiguration, Tiling,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
+    WindowDecorations, WindowKind, WindowParams, WindowVisibility,
     layer_shell::{Anchor, LayerShellNotSupportedError},
     popup::PopupOptions,
     px, size,
@@ -124,6 +124,9 @@ pub struct WaylandWindowState {
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
+    /// The focused text region's preferences, sent as the input method's
+    /// content type while this window has the keyboard.
+    text_input_configuration: TextInputConfiguration,
     decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
     fullscreen: bool,
@@ -626,6 +629,7 @@ impl WaylandWindowState {
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
+            text_input_configuration: TextInputConfiguration::default(),
             decorations: WindowDecorations::Client,
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
@@ -1530,6 +1534,10 @@ impl WaylandWindowStatePtr {
         bounds
     }
 
+    pub fn text_input_configuration(&self) -> TextInputConfiguration {
+        self.state.borrow().text_input_configuration.clone()
+    }
+
     pub fn set_size_and_scale(&self, size: Option<Size<Pixels>>, scale: Option<f32>) {
         let (size, scale) = {
             let mut state = self.state.borrow_mut();
@@ -2264,6 +2272,16 @@ impl PlatformWindow for WaylandWindow {
             return;
         }
         state.client.update_ime_position(bounds);
+    }
+
+    fn set_text_input_configuration(&mut self, configuration: TextInputConfiguration) {
+        let mut state = self.borrow_mut();
+        state.text_input_configuration = configuration.clone();
+        if state.active {
+            let client = state.client.clone();
+            drop(state);
+            client.update_ime_content_type(&configuration);
+        }
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
