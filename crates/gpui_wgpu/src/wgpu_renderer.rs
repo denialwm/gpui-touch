@@ -1236,6 +1236,14 @@ impl WgpuRendererCore {
         let queue = Arc::clone(&context.queue);
         let rendering_params = RenderingParameters::new(&context.adapter, target_format);
         let uses_webgl_instance_data = context.uses_webgl_instance_data();
+        log::info!(
+            "GPUI instance data: {}",
+            if uses_webgl_instance_data {
+                "texture-backed"
+            } else {
+                "storage-buffer-backed"
+            }
+        );
         let dual_source_blending =
             context.supports_dual_source_blending() && !uses_webgl_instance_data;
         let bind_group_layouts = Self::create_bind_group_layouts(&device, uses_webgl_instance_data);

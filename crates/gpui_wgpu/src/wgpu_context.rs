@@ -57,6 +57,9 @@ impl DeviceErrorState {
 
     fn record(&self, error: String) {
         let mut last_error = self.last_error.lock();
+        if last_error.0 == 0 {
+            log::error!("first wgpu device error: {error}");
+        }
         last_error.0 = last_error.0.wrapping_add(1);
         last_error.1 = Some(error);
     }
@@ -723,8 +726,20 @@ impl WgpuContext {
         self.backend
     }
 
+    /// Texture-backed records also cover native GLES adapters without vertex
+    /// storage buffers, such as Adreno 5xx. GLES 3.1 alone does not imply that
+    /// storage buffers are available in the vertex stage.
     pub fn uses_webgl_instance_data(&self) -> bool {
-        matches!(self.backend, WgpuBackend::Gl) && cfg!(target_family = "wasm")
+        let is_gl = matches!(
+            self.backend,
+            WgpuBackend::Gl | WgpuBackend::Native(wgpu::Backend::Gl)
+        );
+        let vertex_storage = self
+            .adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VERTEX_STORAGE);
+        is_gl && (cfg!(target_family = "wasm") || !vertex_storage)
     }
 
     pub fn supports_dual_source_blending(&self) -> bool {
