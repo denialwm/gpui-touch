@@ -9,9 +9,6 @@ use std::num::NonZeroU64;
 
 /// The blurred texture is at most this many halvings below the frame.
 const MAX_LEVELS: usize = 4;
-/// Uniform records one blur takes: its halvings, two Gaussian passes and
-/// the composite.
-const RECORDS_PER_BLUR: u64 = MAX_LEVELS as u64 + 3;
 /// Half floats keep dark gradients from banding once blurred.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Pooled textures grow in these steps, so a blur that moves or resizes
@@ -89,6 +86,16 @@ impl PooledTexture {
         }
         slot.as_ref().expect("the slot was just filled")
     }
+}
+
+/// Uniform bytes one blur takes: its halvings and two Gaussian passes, then
+/// the composite, each record starting on `alignment`. A record larger than
+/// the alignment takes more than one step of it: the composite does where
+/// the alignment is 64.
+fn bytes_per_blur(alignment: u64) -> u64 {
+    let record = |size: usize| (size as u64).next_multiple_of(alignment);
+    (MAX_LEVELS as u64 + 2) * record(std::mem::size_of::<BlurPass>())
+        + record(std::mem::size_of::<Composite>())
 }
 
 fn texel_size(texture: &wgpu::Texture) -> [f32; 2] {
@@ -271,7 +278,7 @@ impl BackdropBlurs {
             clear,
             add,
             sampler,
-            uniforms: Self::create_uniforms(device, alignment * RECORDS_PER_BLUR * 4),
+            uniforms: Self::create_uniforms(device, bytes_per_blur(alignment) * 4),
             alignment,
             staged: Vec::new(),
             slots: Vec::new(),
@@ -290,7 +297,7 @@ impl BackdropBlurs {
     /// Makes room for the uniform records of `count` blurs.
     pub(super) fn begin_frame(&mut self, device: &wgpu::Device, count: usize) {
         self.staged.clear();
-        let needed = count as u64 * RECORDS_PER_BLUR * self.alignment;
+        let needed = count as u64 * bytes_per_blur(self.alignment);
         if self.uniforms.size() < needed {
             self.uniforms = Self::create_uniforms(device, needed.next_power_of_two());
         }
