@@ -205,7 +205,7 @@ impl WgpuContext {
         any(test, feature = "bench-support", feature = "test-support")
     ))]
     fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
-        let instance = Self::instance(None);
+        let instance = Self::instance(wgpu::Backends::VULKAN | wgpu::Backends::GL, None);
         let device_id_filter = Self::device_id_filter();
         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
             gpui::block_on(async {
@@ -472,9 +472,12 @@ impl WgpuContext {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+    pub fn instance(
+        backends: wgpu::Backends,
+        display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
+    ) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
