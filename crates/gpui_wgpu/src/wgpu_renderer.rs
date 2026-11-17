@@ -1459,7 +1459,14 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
-        self.ensure_intermediate_textures(size);
+        // The path textures are as large as the target, one of them
+        // multisampled: five targets' worth of memory at four samples. Only a
+        // scene that draws paths holds them.
+        if scene.paths.is_empty() {
+            self.resources.invalidate_intermediate_textures();
+        } else {
+            self.ensure_intermediate_textures(size);
+        }
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
@@ -2776,6 +2783,56 @@ mod tests {
         assert_pixel(&image, 24, 16, RED);
         assert_pixel(&image, 40, 16, BLUE);
         assert_pixel(&image, 56, 16, BLUE);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn headless_renderer_holds_path_textures_only_for_scenes_with_paths() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let size = device_size(32, 32);
+
+        let mut plain = Scene::default();
+        plain.insert_primitive(solid_quad(0.0, 0.0, 32.0, 32.0, gpui::red()));
+        plain.finish();
+        renderer.render_scene(&plain, size)?;
+        assert!(renderer.core.resources.path_intermediate_texture.is_none());
+        assert!(renderer.core.resources.path_msaa_texture.is_none());
+
+        let corner = |x: f32, y: f32| Point {
+            x: gpui::px(x),
+            y: gpui::px(y),
+        };
+        let mut triangle = gpui::Path::new(corner(2.0, 2.0));
+        triangle.line_to(corner(30.0, 2.0));
+        triangle.line_to(corner(30.0, 30.0));
+        let mut triangle = triangle.scale(1.0);
+        triangle.color = gpui::blue().into();
+        triangle.content_mask = ContentMask {
+            bounds: Bounds {
+                origin: Point {
+                    x: 0.0.into(),
+                    y: 0.0.into(),
+                },
+                size: Size {
+                    width: 32.0.into(),
+                    height: 32.0.into(),
+                },
+            },
+        };
+        let mut drawn = Scene::default();
+        drawn.insert_primitive(solid_quad(0.0, 0.0, 32.0, 32.0, gpui::red()));
+        drawn.insert_primitive(triangle);
+        drawn.finish();
+        let image = renderer.render_scene_to_image(&drawn, size)?;
+        assert_pixel(&image, 24, 10, BLUE);
+        assert_pixel(&image, 6, 26, RED);
+        let texture = renderer.core.resources.path_intermediate_texture.as_ref();
+        assert_eq!(texture.map(|texture| texture.width()), Some(32));
+
+        renderer.render_scene(&plain, size)?;
+        assert!(renderer.core.resources.path_intermediate_texture.is_none());
+        assert!(renderer.core.resources.path_msaa_texture.is_none());
         Ok(())
     }
 
